@@ -7,6 +7,7 @@ import pytest
 
 from src.automation_toolkit.workflows import (
     AuditLedger,
+    main,
     sanitize_and_export_csv,
     scan_duplicates,
 )
@@ -15,15 +16,15 @@ from src.automation_toolkit.workflows import (
 def test_two_stage_duplicate_scanner_identifies_identical_payloads(tmp_path: Path) -> None:
     ledger = AuditLedger(":memory:")
 
-    (tmp_path / "alpha.txt").write_bytes(b"cardiff-university-software-engineering-2026")
-    (tmp_path / "beta_copy.txt").write_bytes(b"cardiff-university-software-engineering-2026")
+    (tmp_path / "alpha.txt").write_bytes(b"duplicate-file-payload-sample-data-2026")
+    (tmp_path / "beta_copy.txt").write_bytes(b"duplicate-file-payload-sample-data-2026")
     (tmp_path / "unique.txt").write_bytes(b"distinct-payload")
 
     report = scan_duplicates(tmp_path, ledger=ledger)
     assert report.scanned_files == 3
     assert report.unique_hashes == 2
     assert len(report.duplicate_groups) == 1
-    assert report.duplicate_groups[0].reclaimable_bytes == 44
+    assert report.duplicate_groups[0].reclaimable_bytes == 39
 
     runs = ledger.list_runs()
     assert len(runs) == 1
@@ -41,39 +42,42 @@ def test_two_stage_duplicate_scanner_handles_distinct_files_same_size(tmp_path: 
     assert len(report.duplicate_groups) == 0
 
 
-def test_csv_sanitizer_filters_invalid_rows_and_deduplicates(tmp_path: Path) -> None:
+def test_csv_sanitizer_handles_ragged_rows_duplicates_and_whitespace(tmp_path: Path) -> None:
     ledger = AuditLedger(":memory:")
-    csv_file = tmp_path / "students.csv"
+    csv_file = tmp_path / "accounts.csv"
     out_json = tmp_path / "out" / "cleaned.json"
 
     csv_file.write_text(
-        "id,email,module\n"
-        "101, alice@cardiff.ac.uk ,CM2104\n"
-        "102,ALICE@cardiff.ac.uk,CM2104\n"
-        "103,,CM2104\n"
-        "104,bob@cardiff.ac.uk,CM2208\n",
+        "id,email,team\n"
+        "101, alice@example.org ,PLAT\n"
+        "102,ALICE@example.org,PLAT\n"
+        "103,,PLAT\n"
+        "104,extra@example.org,DATA,unexpected_extra_column\n"
+        "105,bob@example.org,SEC\n",
         encoding="utf-8",
     )
 
     report = sanitize_and_export_csv(
         input_csv=csv_file,
         output_json=out_json,
-        required_fields=["id", "email", "module"],
+        required_fields=["id", "email", "team"],
         dedupe_key="email",
         ledger=ledger,
     )
 
-    assert report.input_rows == 4
+    assert report.input_rows == 5
     assert report.valid_rows == 2
-    assert report.rejected_rows == 1
+    assert report.rejected_rows == 2
     assert report.duplicates_removed == 1
 
     exported = json.loads(out_json.read_text(encoding="utf-8"))
     assert len(exported) == 2
-    assert exported[0]["email"] == "alice@cardiff.ac.uk"
+    assert exported[0]["email"] == "alice@example.org"
 
 
-def test_workflows_validate_directories_and_csv_headers(tmp_path: Path) -> None:
+def test_workflows_validate_directories_headers_and_cli(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     with pytest.raises(NotADirectoryError):
         scan_duplicates(tmp_path / "does_not_exist")
 
@@ -86,3 +90,7 @@ def test_workflows_validate_directories_and_csv_headers(tmp_path: Path) -> None:
             required_fields=["id", "email"],
             dedupe_key="email",
         )
+
+    assert main(["scan", str(tmp_path)]) == 0
+    cli_report = json.loads(capsys.readouterr().out)
+    assert cli_report["scanned_files"] == 1

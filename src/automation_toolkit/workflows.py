@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import argparse
 import csv
 import hashlib
 import json
 import sqlite3
-from dataclasses import dataclass
+from collections.abc import Sequence
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Self
@@ -28,6 +30,7 @@ class DeduplicationReport:
     unique_hashes: int
     duplicate_groups: list[DuplicateGroup]
     total_reclaimable_bytes: int
+    skipped_unreadable: int = 0
 
 
 @dataclass(frozen=True)
@@ -40,8 +43,6 @@ class TransformReport:
 
 
 class AuditLedger:
-    # Simple SQLite log table to keep track of when each script ran and how many files/rows it touched.
-
     def __init__(self, db_path: str | Path = ":memory:") -> None:
         self._conn = sqlite3.connect(str(db_path))
         self._conn.row_factory = sqlite3.Row
@@ -127,12 +128,18 @@ def scan_duplicates(
 
     by_size: dict[int, list[Path]] = {}
     scanned = 0
+    skipped = 0
 
     for entry in sorted(root.rglob("*")):
-        if entry.is_file() and not entry.is_symlink():
-            scanned += 1
+        if entry.is_symlink() or not entry.is_file():
+            continue
+        try:
             size = entry.stat().st_size
-            by_size.setdefault(size, []).append(entry)
+        except OSError:
+            skipped += 1
+            continue
+        scanned += 1
+        by_size.setdefault(size, []).append(entry)
 
     by_hash: dict[str, tuple[int, list[Path]]] = {}
     unique_count = 0
@@ -142,7 +149,11 @@ def scan_duplicates(
             unique_count += 1
             continue
         for file_path in paths:
-            digest = compute_sha256(file_path)
+            try:
+                digest = compute_sha256(file_path)
+            except OSError:
+                skipped += 1
+                continue
             if digest not in by_hash:
                 by_hash[digest] = (size, [file_path])
             else:
@@ -168,6 +179,7 @@ def scan_duplicates(
         unique_hashes=unique_count,
         duplicate_groups=groups,
         total_reclaimable_bytes=total_reclaimable,
+        skipped_unreadable=skipped,
     )
 
     if ledger is not None:
@@ -188,15 +200,15 @@ def sanitize_and_export_csv(
     dedupe_key: str,
     ledger: AuditLedger | None = None,
 ) -> TransformReport:
-    """
-    Streams a CSV dataset, trims whitespace, validates required non-empty fields,
-    deduplicates records on a primary key column, and writes deterministic JSON output.
-    """
+    """Stream CSV rows, trim values, drop incomplete or ragged rows, and write unique JSON."""
     src_csv = Path(input_csv)
     dst_json = Path(output_json)
     clean_dedupe_key = dedupe_key.strip()
     if not clean_dedupe_key:
         raise ValueError("dedupe_key must not be blank")
+    clean_required = [f.strip() for f in required_fields if f.strip()]
+    if not clean_required:
+        raise ValueError("required_fields must contain at least one field name")
     if not src_csv.is_file():
         raise FileNotFoundError(f"Input CSV file not found: {src_csv}")
 
@@ -209,22 +221,28 @@ def sanitize_and_export_csv(
     with src_csv.open("r", encoding="utf-8", newline="") as fh:
         reader = csv.DictReader(fh)
         header_fields = {col.strip() for col in (reader.fieldnames or ()) if col}
-        expected_fields = {f.strip() for f in required_fields} | {clean_dedupe_key}
+        expected_fields = set(clean_required) | {clean_dedupe_key}
         missing_headers = sorted(expected_fields - header_fields)
         if missing_headers:
             raise ValueError(f"CSV header missing required columns: {', '.join(missing_headers)}")
 
         for raw_row in reader:
             input_rows += 1
-            normalized = {
-                (k.strip() if k else ""): (v.strip() if v else "")
-                for k, v in raw_row.items()
-            }
-            if any(not normalized.get(field) for field in required_fields):
+            # DictReader places extra comma columns under key None as a list; reject ragged rows safely
+            if None in raw_row or any(not isinstance(v, str) for v in raw_row.values() if v is not None):
                 rejected_rows += 1
                 continue
 
-            key_val = normalized.get(clean_dedupe_key, "").lower()
+            normalised = {
+                k.strip(): (v.strip() if v is not None else "")
+                for k, v in raw_row.items()
+                if k is not None
+            }
+            if any(not normalised.get(field) for field in clean_required):
+                rejected_rows += 1
+                continue
+
+            key_val = normalised.get(clean_dedupe_key, "").lower()
             if not key_val:
                 rejected_rows += 1
                 continue
@@ -233,7 +251,7 @@ def sanitize_and_export_csv(
                 continue
 
             seen_keys.add(key_val)
-            cleaned_records.append(normalized)
+            cleaned_records.append(normalised)
 
     dst_json.parent.mkdir(parents=True, exist_ok=True)
     dst_json.write_text(
@@ -262,3 +280,42 @@ def sanitize_and_export_csv(
         )
 
     return report
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="File deduplication scanner and CSV-to-JSON cleaner."
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    scan_cmd = sub.add_parser("scan", help="Find duplicate files under a folder")
+    scan_cmd.add_argument("directory", type=Path, help="Folder to scan")
+
+    csv_cmd = sub.add_parser("sanitize", help="Clean CSV rows into deduplicated JSON")
+    csv_cmd.add_argument("input_csv", type=Path)
+    csv_cmd.add_argument("output_json", type=Path)
+    csv_cmd.add_argument("--required", nargs="+", required=True)
+    csv_cmd.add_argument("--key", required=True)
+
+    args = parser.parse_args(argv)
+    if args.command == "scan":
+        print(json.dumps(asdict(scan_duplicates(args.directory)), indent=2))
+    else:
+        print(
+            json.dumps(
+                asdict(
+                    sanitize_and_export_csv(
+                        args.input_csv,
+                        args.output_json,
+                        required_fields=args.required,
+                        dedupe_key=args.key,
+                    )
+                ),
+                indent=2,
+            )
+        )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
