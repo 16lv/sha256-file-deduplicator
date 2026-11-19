@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from src.automation_toolkit.workflows import (
+from automation_toolkit.workflows import (
     AuditLedger,
     main,
     sanitize_and_export_csv,
