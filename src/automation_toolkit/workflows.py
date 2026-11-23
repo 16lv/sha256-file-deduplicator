@@ -31,6 +31,7 @@ class DeduplicationReport:
     duplicate_groups: list[DuplicateGroup]
     total_reclaimable_bytes: int
     skipped_unreadable: int = 0
+    skipped_below_min_size: int = 0
 
 
 @dataclass(frozen=True)
@@ -121,7 +122,10 @@ def compute_sha256(path: Path, chunk_size: int = 65536) -> str:
 def scan_duplicates(
     root_dir: Path,
     ledger: AuditLedger | None = None,
+    min_size_bytes: int = 0,
 ) -> DeduplicationReport:
+    if min_size_bytes < 0:
+        raise ValueError("min_size_bytes must be non-negative")
     root = Path(root_dir)
     if not root.is_dir():
         raise NotADirectoryError(f"Root path is not a directory: {root}")
@@ -129,6 +133,7 @@ def scan_duplicates(
     by_size: dict[int, list[Path]] = {}
     scanned = 0
     skipped = 0
+    below_min = 0
 
     for entry in sorted(root.rglob("*")):
         if entry.is_symlink() or not entry.is_file():
@@ -137,6 +142,9 @@ def scan_duplicates(
             size = entry.stat().st_size
         except OSError:
             skipped += 1
+            continue
+        if size < min_size_bytes:
+            below_min += 1
             continue
         scanned += 1
         by_size.setdefault(size, []).append(entry)
@@ -180,6 +188,7 @@ def scan_duplicates(
         duplicate_groups=groups,
         total_reclaimable_bytes=total_reclaimable,
         skipped_unreadable=skipped,
+        skipped_below_min_size=below_min,
     )
 
     if ledger is not None:
@@ -290,6 +299,12 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     scan_cmd = sub.add_parser("scan", help="Find duplicate files under a folder")
     scan_cmd.add_argument("directory", type=Path, help="Folder to scan")
+    scan_cmd.add_argument(
+        "--min-size",
+        type=int,
+        default=0,
+        help="Skip files smaller than this many bytes (e.g. 1 ignores empty files)",
+    )
 
     csv_cmd = sub.add_parser("sanitize", help="Clean CSV rows into deduplicated JSON")
     csv_cmd.add_argument("input_csv", type=Path)
@@ -299,7 +314,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     if args.command == "scan":
-        print(json.dumps(asdict(scan_duplicates(args.directory)), indent=2))
+        print(json.dumps(asdict(scan_duplicates(args.directory, min_size_bytes=args.min_size)), indent=2))
     else:
         print(
             json.dumps(

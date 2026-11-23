@@ -8,10 +8,10 @@ Two-stage SHA-256 duplicate file finder, strict CSV-to-JSON cleaner, and SQLite 
 
 ## Features
 
-- **Size-before-hash scanning**: `scan_duplicates()` groups files by `st_size` first and only hashes `64 KiB` chunks when two or more regular files share the same byte count, while skipping symlinks and unreadable `OSError` entries cleanly.
+- **Size-before-hash scanning**: `scan_duplicates()` groups files by `st_size` first and only hashes `64 KiB` chunks when two or more regular files share the same byte count, supporting a configurable `--min-size` (`min_size_bytes`) threshold and reporting `skipped_below_min_size` while skipping symlinks cleanly.
 - **Ragged-CSV safe cleaning**: `sanitize_and_export_csv()` validates expected headers, trims whitespace, rejects incomplete or extra-column ragged rows cleanly, and removes duplicates case-insensitively on a chosen key.
 - **Audit ledger**: `AuditLedger` records processed counts, affected counts, timestamps, and structured JSON run summaries into SQLite.
-- **Installable CLI**: Provides the `sha256-dedupe` command with `scan` and `sanitize` subcommands.
+- **Installable CLI**: Provides the `sha256-dedupe` command with `scan` (`--min-size`) and `sanitize` subcommands.
 
 ## Technology Stack
 

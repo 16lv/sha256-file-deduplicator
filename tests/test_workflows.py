@@ -94,3 +94,17 @@ def test_workflows_validate_directories_headers_and_cli(
     assert main(["scan", str(tmp_path)]) == 0
     cli_report = json.loads(capsys.readouterr().out)
     assert cli_report["scanned_files"] == 1
+
+
+def test_min_size_filter_skips_empty_placeholder_files(tmp_path: Path) -> None:
+    (tmp_path / "empty1.txt").write_bytes(b"")
+    (tmp_path / "empty2.txt").write_bytes(b"")
+    (tmp_path / "real.txt").write_bytes(b"non-empty-content")
+
+    with_empty = scan_duplicates(tmp_path, min_size_bytes=0)
+    assert len(with_empty.duplicate_groups) == 1
+
+    filtered = scan_duplicates(tmp_path, min_size_bytes=1)
+    assert filtered.scanned_files == 1
+    assert filtered.skipped_below_min_size == 2
+    assert filtered.duplicate_groups == []
