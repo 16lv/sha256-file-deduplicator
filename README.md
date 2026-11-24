@@ -27,16 +27,16 @@ pip install -e ".[dev]"
 
 ## Usage Examples
 
-Scan a directory for duplicate files:
+Scan a directory for duplicate files (optionally recording the run to an audit ledger and filtering small files):
 
 ```bash
-sha256-dedupe scan ./documents
+sha256-dedupe scan ./documents --min-size 1 --ledger runs.db
 ```
 
 Clean a CSV export into deduplicated JSON:
 
 ```bash
-sha256-dedupe sanitize accounts.csv cleaned.json --required id email team --key email
+sha256-dedupe sanitize accounts.csv cleaned.json --required id email team --key email --ledger runs.db
 ```
 
 ## Technical Implementation Details

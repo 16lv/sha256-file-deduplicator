@@ -108,3 +108,25 @@ def test_min_size_filter_skips_empty_placeholder_files(tmp_path: Path) -> None:
     assert filtered.scanned_files == 1
     assert filtered.skipped_below_min_size == 2
     assert filtered.duplicate_groups == []
+
+
+def test_cli_records_audit_ledger_and_handles_missing_paths(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    folder = tmp_path / "files"
+    folder.mkdir()
+    (folder / "a.bin").write_bytes(b"same")
+    (folder / "b.bin").write_bytes(b"same")
+    ledger_db = tmp_path / "ledger.db"
+
+    assert main(["scan", str(folder), "--ledger", str(ledger_db)]) == 0
+    capsys.readouterr()
+
+    with AuditLedger(ledger_db) as ledger:
+        runs = ledger.list_runs()
+        assert len(runs) == 1
+        assert runs[0]["workflow_type"] == "deduplicate_scan"
+        assert runs[0]["affected_items"] == 1
+
+    assert main(["scan", str(tmp_path / "missing_dir")]) == 2
+    assert "error:" in capsys.readouterr().err

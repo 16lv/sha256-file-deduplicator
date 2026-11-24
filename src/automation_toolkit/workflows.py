@@ -5,6 +5,7 @@ import csv
 import hashlib
 import json
 import sqlite3
+import sys
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -305,31 +306,64 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=0,
         help="Skip files smaller than this many bytes (e.g. 1 ignores empty files)",
     )
+    scan_cmd.add_argument(
+        "--ledger",
+        type=Path,
+        default=None,
+        help="Optional SQLite audit ledger path for recording this workflow run",
+    )
 
     csv_cmd = sub.add_parser("sanitize", help="Clean CSV rows into deduplicated JSON")
     csv_cmd.add_argument("input_csv", type=Path)
     csv_cmd.add_argument("output_json", type=Path)
     csv_cmd.add_argument("--required", nargs="+", required=True)
     csv_cmd.add_argument("--key", required=True)
+    csv_cmd.add_argument(
+        "--ledger",
+        type=Path,
+        default=None,
+        help="Optional SQLite audit ledger path for recording this workflow run",
+    )
 
     args = parser.parse_args(argv)
-    if args.command == "scan":
-        print(json.dumps(asdict(scan_duplicates(args.directory, min_size_bytes=args.min_size)), indent=2))
-    else:
-        print(
-            json.dumps(
-                asdict(
-                    sanitize_and_export_csv(
-                        args.input_csv,
-                        args.output_json,
-                        required_fields=args.required,
-                        dedupe_key=args.key,
+    try:
+        ledger: AuditLedger | None = AuditLedger(args.ledger) if args.ledger else None
+        try:
+            if args.command == "scan":
+                print(
+                    json.dumps(
+                        asdict(
+                            scan_duplicates(
+                                args.directory,
+                                ledger=ledger,
+                                min_size_bytes=args.min_size,
+                            )
+                        ),
+                        indent=2,
                     )
-                ),
-                indent=2,
-            )
-        )
-    return 0
+                )
+            else:
+                print(
+                    json.dumps(
+                        asdict(
+                            sanitize_and_export_csv(
+                                args.input_csv,
+                                args.output_json,
+                                required_fields=args.required,
+                                dedupe_key=args.key,
+                                ledger=ledger,
+                            )
+                        ),
+                        indent=2,
+                    )
+                )
+        finally:
+            if ledger is not None:
+                ledger.close()
+        return 0
+    except (FileNotFoundError, NotADirectoryError, ValueError, OSError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":
